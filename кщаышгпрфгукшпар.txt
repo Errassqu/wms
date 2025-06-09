@@ -1,3 +1,57 @@
+CREATE TABLE Users (
+    UserID INT IDENTITY(1,1) PRIMARY KEY,
+    Username NVARCHAR(50) NOT NULL UNIQUE,
+    PasswordHash NVARCHAR(64) NOT NULL,
+    Role NVARCHAR(20) NOT NULL DEFAULT 'User',
+    FailedLoginAttempts INT NOT NULL DEFAULT 0,
+    LockedUntil DATETIME NULL,
+    LastLoginDate DATETIME NULL,
+    CreatedDate DATETIME NOT NULL DEFAULT GETDATE()
+);
+
+CREATE TABLE LoginLogs (
+    LogID INT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    LoginTime DATETIME NOT NULL DEFAULT GETDATE(),
+    Success BIT NOT NULL,
+    IPAddress NVARCHAR(45) NULL,
+    CONSTRAINT FK_LoginLogs_Users FOREIGN KEY (UserID) REFERENCES Users(UserID)
+);
+
+
+CREATE NONCLUSTERED INDEX IX_Users_Username ON Users (Username);
+CREATE NONCLUSTERED INDEX IX_LoginLogs_UserID ON LoginLogs (UserID);
+CREATE NONCLUSTERED INDEX IX_LoginLogs_LoginTime ON LoginLogs (LoginTime DESC);
+
+private static string connectionString = "Server=your_server;Database=your_db;User Id=your_user;Password=your_password;";
+
+CREATE TRIGGER UpdateLastLogin
+ON LoginLogs
+AFTER INSERT
+AS
+BEGIN
+    UPDATE u
+    SET LastLoginDate = GETDATE()
+    FROM Users u
+    INNER JOIN inserted i ON u.UserID = i.UserID
+    WHERE i.Success = 1
+END;
+
+CREATE VIEW UserSummary AS
+SELECT 
+    u.UserID,
+    u.Username,
+    u.Role,
+    CASE 
+        WHEN u.LockedUntil > GETDATE() THEN 1 
+        ELSE 0 
+    END AS IsLocked,
+    FORMAT(u.LastLoginDate, 'dd.MM.yyyy HH:mm') AS LastLogin,
+    FORMAT(u.CreatedDate, 'dd.MM.yyyy') AS CreatedDate,
+    (SELECT COUNT(*) FROM LoginLogs l WHERE l.UserID = u.UserID) AS TotalLogins,
+    (SELECT COUNT(*) FROM LoginLogs l WHERE l.UserID = u.UserID AND l.Success = 0) AS FailedLogins
+FROM Users u;
+
 using System.Data.SqlClient;
 using System.Security.Cryptography;
 using System.Text;
