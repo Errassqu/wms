@@ -1,0 +1,643 @@
+using System.Data.SqlClient;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace AuthSystem
+{
+    internal static class DatabaseHelper
+    {
+        private static string connectionString = "Your_Connection_String_Here";
+
+        public static SqlConnection GetConnection()
+        {
+            return new SqlConnection(connectionString);
+        }
+
+        public static string HashPassword(string password)
+        {
+            const string salt = "secure_salt_value";
+            using (var sha256 = SHA256.Create())
+            {
+                var combined = Encoding.UTF8.GetBytes(password + salt);
+                var hashBytes = sha256.ComputeHash(combined);
+                
+                var builder = new StringBuilder();
+                foreach (var b in hashBytes)
+                {
+                    builder.Append(b.ToString("x2"));
+                }
+                return builder.ToString();
+            }
+        }
+
+        public static bool IsUserLocked(string username)
+        {
+            using (var conn = GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "SELECT LockedUntil FROM Users WHERE Username = @username", conn);
+                cmd.Parameters.AddWithValue("@username", username);
+
+                var result = cmd.ExecuteScalar();
+                if (result == null || result == DBNull.Value) return false;
+
+                return (DateTime)result > DateTime.Now;
+            }
+        }
+
+        public static int ExecuteNonQuery(string sql, params SqlParameter[] parameters)
+        {
+            using (var conn = GetConnection())
+            {
+                conn.Open();
+                using (var cmd = new SqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddRange(parameters);
+                    return cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        public static object ExecuteScalar(string sql, params SqlParameter[] parameters)
+        {
+            using (var conn = GetConnection())
+            {
+                conn.Open();
+                using (var cmd = new SqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddRange(parameters);
+                    return cmd.ExecuteScalar();
+                }
+            }
+        }
+public static bool UserExists(string username)
+{
+    using (var conn = GetConnection())
+    {
+        conn.Open();
+        var cmd = new SqlCommand(
+            "SELECT COUNT(*) FROM Users WHERE Username = @username", conn);
+        cmd.Parameters.AddWithValue("@username", username);
+        return (int)cmd.ExecuteScalar() > 0;
+    }
+}
+    }
+}
+
+using System;
+using System.Data.SqlClient;
+using System.Windows.Forms;
+
+namespace AuthSystem
+{
+    public partial class LoginForm : Form
+    {
+        public LoginForm()
+        {
+            InitializeComponent();
+        }
+
+        private void btnLogin_Click(object sender, EventArgs e)
+        {
+            string username = txtUsername.Text.Trim();
+            string password = txtPassword.Text;
+
+            if (DatabaseHelper.IsUserLocked(username))
+            {
+                MessageBox.Show("Аккаунт заблокирован на 24 часа");
+                return;
+            }
+
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "SELECT UserID, PasswordHash, Role FROM Users WHERE Username = @username", 
+                    conn);
+                cmd.Parameters.AddWithValue("@username", username);
+
+                using (var reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        string storedHash = reader["PasswordHash"].ToString();
+                        string inputHash = DatabaseHelper.HashPassword(password);
+
+                        if (storedHash == inputHash)
+                        {
+                            LogLoginAttempt(username, true);
+                            ResetFailedAttempts(username);
+
+                            int userId = (int)reader["UserID"];
+                            string role = reader["Role"].ToString();
+                            
+                            var mainForm = new MainForm(userId, role);
+                            mainForm.Show();
+                            this.Hide();
+                            return;
+                        }
+                    }
+                }
+
+                LogLoginAttempt(username, false);
+                IncrementFailedAttempts(username);
+                MessageBox.Show("Неверные учетные данные");
+            }
+        }
+
+        private void LogLoginAttempt(string username, bool isSuccess)
+        {
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "INSERT INTO LoginLogs (UserID, LoginTime, Success) " +
+                    "VALUES ((SELECT UserID FROM Users WHERE Username = @username), GETDATE(), @success)", 
+                    conn);
+                cmd.Parameters.AddWithValue("@username", username);
+                cmd.Parameters.AddWithValue("@success", isSuccess);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private void IncrementFailedAttempts(string username)
+        {
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "UPDATE Users SET FailedLoginAttempts = FailedLoginAttempts + 1 " +
+                    "WHERE Username = @username", conn);
+                cmd.Parameters.AddWithValue("@username", username);
+                cmd.ExecuteNonQuery();
+
+                cmd = new SqlCommand(
+                    "SELECT FailedLoginAttempts FROM Users WHERE Username = @username", conn);
+                cmd.Parameters.AddWithValue("@username", username);
+                int attempts = (int)cmd.ExecuteScalar();
+
+                if (attempts >= 3)
+                {
+                    cmd = new SqlCommand(
+                        "UPDATE Users SET LockedUntil = DATEADD(day, 1, GETDATE()) " +
+                        "WHERE Username = @username", conn);
+                    cmd.Parameters.AddWithValue("@username", username);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void ResetFailedAttempts(string username)
+        {
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "UPDATE Users SET FailedLoginAttempts = 0, LockedUntil = NULL " +
+                    "WHERE Username = @username", conn);
+                cmd.Parameters.AddWithValue("@username", username);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private void btnRegister_Click(object sender, EventArgs e)
+        {
+            var registerForm = new RegisterForm();
+            registerForm.ShowDialog();
+        }
+    }
+}
+
+using System;
+using System.Data.SqlClient;
+using System.Windows.Forms;
+
+namespace AuthSystem
+{
+    public partial class RegisterForm : Form
+    {
+        public RegisterForm()
+        {
+            InitializeComponent();
+        }
+
+        private void btnRegister_Click(object sender, EventArgs e)
+        {
+            if (txtPassword.Text != txtConfirmPassword.Text)
+            {
+                MessageBox.Show("Пароли не совпадают");
+                return;
+            }
+
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var checkCmd = new SqlCommand(
+                    "SELECT COUNT(*) FROM Users WHERE Username = @username", conn);
+                checkCmd.Parameters.AddWithValue("@username", txtUsername.Text);
+                int exists = (int)checkCmd.ExecuteScalar();
+
+                if (exists > 0)
+                {
+                    MessageBox.Show("Имя пользователя занято");
+                    return;
+                }
+
+                var cmd = new SqlCommand(
+                    "INSERT INTO Users (Username, PasswordHash, Role) " +
+                    "VALUES (@username, @password, 'User')", conn);
+                cmd.Parameters.AddWithValue("@username", txtUsername.Text);
+                cmd.Parameters.AddWithValue("@password", DatabaseHelper.HashPassword(txtPassword.Text));
+                cmd.ExecuteNonQuery();
+
+                MessageBox.Show("Регистрация успешна!");
+                this.Close();
+            }
+        }
+    }
+}
+
+using System;
+using System.Windows.Forms;
+
+namespace AuthSystem
+{
+    internal static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new LoginForm());
+        }
+    }
+}
+
+CREATE TABLE Users (
+    UserID INT IDENTITY(1,1) PRIMARY KEY,
+    Username NVARCHAR(50) NOT NULL UNIQUE,
+    PasswordHash NVARCHAR(64) NOT NULL,
+    Role NVARCHAR(20) NOT NULL DEFAULT 'User',
+    FailedLoginAttempts INT NOT NULL DEFAULT 0,
+    LockedUntil DATETIME NULL,
+    LastLoginDate DATETIME NULL
+);
+
+CREATE TABLE LoginLogs (
+    LogID INT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    LoginTime DATETIME NOT NULL,
+    Success BIT NOT NULL,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID)
+);
+
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Windows.Forms;
+
+namespace AuthSystem
+{
+    public partial class MainForm : Form
+    {
+        private int _userId;
+        private string _role;
+        
+        public MainForm(int userId, string role)
+        {
+            InitializeComponent();
+            _userId = userId;
+            _role = role;
+            ConfigureForm();
+            LoadData();
+        }
+
+        private void ConfigureForm()
+        {
+            // Настройка видимости элементов в зависимости от роли
+            btnManageUsers.Visible = (_role == "Admin");
+            btnCreate.Visible = (_role == "Admin");
+            btnDelete.Visible = (_role == "Admin");
+            
+            // Настройка DataGridView
+            dgvMain.AutoGenerateColumns = false;
+            dgvMain.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvMain.AllowUserToAddRows = false;
+            dgvMain.AllowUserToDeleteRows = false;
+            dgvMain.ReadOnly = true;
+            
+            // Создание столбцов
+            var columns = new DataGridViewColumn[]
+            {
+                new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = "UserID",
+                    HeaderText = "ID",
+                    Visible = false
+                },
+                new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = "Username",
+                    HeaderText = "Логин",
+                    Width = 150
+                },
+                new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = "Role",
+                    HeaderText = "Роль",
+                    Width = 100
+                },
+                new DataGridViewCheckBoxColumn
+                {
+                    DataPropertyName = "IsLocked",
+                    HeaderText = "Заблокирован",
+                    Width = 100
+                },
+                new DataGridViewTextBoxColumn
+                {
+                    DataPropertyName = "LastLogin",
+                    HeaderText = "Последний вход",
+                    Width = 150
+                }
+            };
+            
+            dgvMain.Columns.Clear();
+            dgvMain.Columns.AddRange(columns);
+            
+            // Настройка меню
+            usersToolStripMenuItem.Visible = (_role == "Admin");
+            this.Text = $"Система управления - {_role}";
+            lblWelcome.Text = $"Добро пожаловать, {GetUserName(_userId)}!";
+        }
+
+        private string GetUserName(int userId)
+        {
+            using (var conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                var cmd = new SqlCommand(
+                    "SELECT Username FROM Users WHERE UserID = @id", conn);
+                cmd.Parameters.AddWithValue("@id", userId);
+                return cmd.ExecuteScalar()?.ToString() ?? "Пользователь";
+            }
+        }
+
+        private void LoadData()
+        {
+            try
+            {
+                using (var conn = DatabaseHelper.GetConnection())
+                {
+                    conn.Open();
+                    SqlCommand cmd;
+                    
+                    // Для администратора показываем всех пользователей
+                    if (_role == "Admin")
+                    {
+                        cmd = new SqlCommand(
+                            @"SELECT 
+                                UserID, 
+                                Username, 
+                                Role, 
+                                CASE WHEN LockedUntil > GETDATE() THEN 1 ELSE 0 END AS IsLocked,
+                                FORMAT(LastLoginDate, 'dd.MM.yyyy HH:mm') AS LastLogin
+                              FROM Users", conn);
+                    }
+                    // Для обычных пользователей показываем только их данные
+                    else
+                    {
+                        cmd = new SqlCommand(
+                            @"SELECT 
+                                UserID, 
+                                Username, 
+                                Role, 
+                                CASE WHEN LockedUntil > GETDATE() THEN 1 ELSE 0 END AS IsLocked,
+                                FORMAT(LastLoginDate, 'dd.MM.yyyy HH:mm') AS LastLogin
+                              FROM Users
+                              WHERE UserID = @userId", conn);
+                        cmd.Parameters.AddWithValue("@userId", _userId);
+                    }
+
+                    var adapter = new SqlDataAdapter(cmd);
+                    var table = new DataTable();
+                    adapter.Fill(table);
+
+                    dgvMain.DataSource = table;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка загрузки данных: {ex.Message}");
+            }
+        }
+
+        private void btnRefresh_Click(object sender, EventArgs e)
+        {
+            LoadData();
+        }
+
+        private void btnCreate_Click(object sender, EventArgs e)
+        {
+            var form = new UserEditForm(null);
+            if (form.ShowDialog() == DialogResult.OK)
+            {
+                LoadData();
+            }
+        }
+
+        private void btnDelete_Click(object sender, EventArgs e)
+        {
+            if (dgvMain.SelectedRows.Count == 0) return;
+            
+            int selectedUserId = (int)dgvMain.SelectedRows[0].Cells["UserID"].Value;
+            string username = dgvMain.SelectedRows[0].Cells["Username"].Value.ToString();
+            
+            // Нельзя удалить самого себя
+            if (selectedUserId == _userId)
+            {
+                MessageBox.Show("Вы не можете удалить свой собственный аккаунт!");
+                return;
+            }
+
+            if (MessageBox.Show($"Вы действительно хотите удалить пользователя '{username}'?", 
+                "Подтверждение удаления", 
+                MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                try
+                {
+                    DatabaseHelper.ExecuteNonQuery(
+                        "DELETE FROM Users WHERE UserID = @id",
+                        new SqlParameter("@id", selectedUserId));
+                    
+                    LoadData();
+                    MessageBox.Show("Пользователь успешно удален");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Ошибка удаления: {ex.Message}");
+                }
+            }
+        }
+
+        private void btnManageUsers_Click(object sender, EventArgs e)
+        {
+            var form = new UsersForm();
+            form.ShowDialog();
+            LoadData(); // Обновляем данные после закрытия формы
+        }
+
+        private void usersToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            btnManageUsers_Click(sender, e);
+        }
+
+        private void logoutToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            var loginForm = new LoginForm();
+            loginForm.Show();
+            this.Close();
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+
+namespace AuthSystem
+{
+    public partial class UserEditForm : Form
+    {
+        private int? _userId;
+
+        public UserEditForm(int? userId)
+        {
+            InitializeComponent();
+            _userId = userId;
+            cbRole.Items.AddRange(new string[] { "User", "Manager", "Admin" });
+
+            if (_userId.HasValue)
+            {
+                this.Text = "Редактирование пользователя";
+                LoadUserData();
+            }
+            else
+            {
+                this.Text = "Создание пользователя";
+            }
+        }
+
+        private void LoadUserData()
+        {
+            try
+            {
+                using (var conn = DatabaseHelper.GetConnection())
+                {
+                    conn.Open();
+                    var cmd = new SqlCommand(
+                        "SELECT Username, Role FROM Users WHERE UserID = @id", conn);
+                    cmd.Parameters.AddWithValue("@id", _userId.Value);
+
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        if (reader.Read())
+                        {
+                            txtUsername.Text = reader["Username"].ToString();
+                            cbRole.SelectedItem = reader["Role"].ToString();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка загрузки данных: {ex.Message}");
+            }
+        }
+
+        private bool ValidateInput()
+        {
+            if (string.IsNullOrWhiteSpace(txtUsername.Text))
+            {
+                MessageBox.Show("Введите логин пользователя");
+                return false;
+            }
+
+            if (!Regex.IsMatch(txtUsername.Text, @"^[a-zA-Z0-9_]{3,20}$"))
+            {
+                MessageBox.Show("Логин должен содержать только буквы, цифры и подчеркивания (3-20 символов)");
+                return false;
+            }
+
+            if (cbRole.SelectedItem == null)
+            {
+                MessageBox.Show("Выберите роль пользователя");
+                return false;
+            }
+
+            if (!_userId.HasValue && string.IsNullOrWhiteSpace(txtPassword.Text))
+            {
+                MessageBox.Show("Введите пароль");
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(txtPassword.Text) && txtPassword.Text.Length < 6)
+            {
+                MessageBox.Show("Пароль должен содержать минимум 6 символов");
+                return false;
+            }
+
+            return true;
+        }
+
+        private void btnSave_Click(object sender, EventArgs e)
+        {
+            if (!ValidateInput()) return;
+
+            try
+            {
+                var parameters = new List<SqlParameter>
+                {
+                    new SqlParameter("@username", txtUsername.Text.Trim()),
+                    new SqlParameter("@role", cbRole.SelectedItem.ToString())
+                };
+
+                string sql;
+                if (_userId.HasValue)
+                {
+                    sql = "UPDATE Users SET Username = @username, Role = @role";
+                    
+                    // Обновляем пароль только если он указан
+                    if (!string.IsNullOrWhiteSpace(txtPassword.Text))
+                    {
+                        sql += ", PasswordHash = @password";
+                        parameters.Add(new SqlParameter("@password", DatabaseHelper.HashPassword(txtPassword.Text)));
+                    }
+                    
+                    sql += " WHERE UserID = @id";
+                    parameters.Add(new SqlParameter("@id", _userId.Value));
+                }
+                else
+                {
+                    sql = "INSERT INTO Users (Username, PasswordHash, Role) VALUES (@username, @password, @role)";
+                    parameters.Add(new SqlParameter("@password", DatabaseHelper.HashPassword(txtPassword.Text)));
+                }
+
+                DatabaseHelper.ExecuteNonQuery(sql, parameters.ToArray());
+                this.DialogResult = DialogResult.OK;
+                this.Close();
+            }
+            catch (SqlException ex) when (ex.Number == 2627) // Ошибка уникальности
+            {
+                MessageBox.Show("Пользователь с таким логином уже существует");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка сохранения: {ex.Message}");
+            }
+        }
+    }
+}
